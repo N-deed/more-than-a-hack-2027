@@ -5,8 +5,10 @@ More Than A Hack 2027, Phase 1. Team: N-deed.
 ## 1. Approach
 
 A deterministic, rule-based system. No model is trained. Version 1 used thresholds set from
-football knowledge alone. Version 2 (the submitted one) recalibrates a few of them on external
-data only, Metrica's open Sample Game 3 (section 3). Nothing is fitted on the challenge match.
+football knowledge alone. Version 2 recalibrates a few of them on external data only, Metrica's open Sample Game 3
+(section 3). Version 3, the submitted one, is version 2 plus one published match fact: the second
+half is graded from video frame 110,808 but kicks off at 113,742 (FAQ.md), so those frames are
+written as dead ball. Nothing is fitted on the challenge match.
 
 We chose rules over a learned model for three reasons:
 
@@ -58,7 +60,8 @@ player is within 1.5 m of the ball and at least 0.5 m closer than the nearest op
   the ball from the restart.
 - An alive stretch with no evidence at all inherits the last team in possession.
 
-Frames outside the two graded halves are written as X.
+Frames outside the two graded halves are written as X. Graded frames before the second-half
+kick-off (110,808 to 113,741, a published fact) are written as D.
 
 ## 2. Assets used
 
@@ -147,15 +150,16 @@ Public 5-minute ground truth, scored with the official `evaluation/run_evaluatio
 
 | submission | macroF1 | spellF1 | possessions (truth: 17) |
 |---|---|---|---|
-| rules_v2 (this work, submitted) | 0.7416 | 0.4444 | 19 |
+| rules_v2 | 0.7416 | 0.4444 | 19 |
 | rules_v1 (a priori thresholds) | 0.7421 | 0.4667 | 19 |
 | baseline_smooth125 | 0.5812 | 0.4242 | 16 |
 | baseline_smooth50 | 0.6207 | 0.3256 | 26 |
 
 These 17 possessions are too few to rank systems reliably, as `EVALUATION.md` shows. The gap
 between v1 and v2 here is one possession matched at IoU 0.5 (9 against 8), well inside the noise.
-We submit v2 because its thresholds are the only ones backed by a measurement (section 3), and
-we did not change anything after seeing this score.
+We kept v2's thresholds because they are the only ones backed by a measurement (section 3), and
+we did not change anything after seeing this score. v3 differs from v2 only on the 2,934 frames
+before the second-half kick-off, outside the public window.
 
 ## 6. What we tried and dropped
 
@@ -167,12 +171,20 @@ third), degraded with the challenge gap model. `solution/experiments.py` reprodu
 | v2 (reference) | rules | 0.596 / 0.578 / 0.548 | kept |
 | team-shape model during ball gaps | a logistic model on collective features (block height, forward speed, width, length, last line, home minus away) predicts the team in possession at 77-79% per frame without the ball; used to change possession during long gaps | 0.595 / 0.578 / 0.549 at best | dropped: no gain. Only 15% of the changes of possession fall inside a ball gap, so there was little to win |
 | recalibrating on SkillCorner | a second, independent reference: SkillCorner phases of play (gaps under 3 s between phases keep the previous team, longer gaps are stoppages), 20 broadcast-tracking matches resampled to 25 fps and degraded the same way; grid on 10 matches, check on the other 10 | v2: Metrica 0.574 mean, SkillCorner held-out 0.490. Best SkillCorner setting (0.8 s confirmation, 2 m, 1.4 m/s): SkillCorner 0.528 but Metrica 0.500. Best average over both providers: v2 (0.532) | v2 kept: the two providers disagree on how quickly possession changes hands, and v2 is the best compromise between them |
+| whistle detector | the referee's whistle seen as a collective deceleration: mean player speed (1 s window) under 1.0-1.4 m/s for 1.5-2.5 s marks a stoppage from the start of the deceleration to the restart | overall (Metrica mean + SkillCorner held-out) 0.440 to 0.529, against 0.532 for v2 | dropped: players also slow down together during play, and the false stoppages cost more than the fouls it finds |
+| last touch before a stoppage | a touch by the other team just before the ball goes dead (a block that ends in a throw-in or corner) gives them the ball from that touch | overall 0.524 against 0.532 | dropped |
 | learned emissions + Viterbi | the rules replaced by a per-frame logistic model (ball distances, players near the ball, team shape) decoded with a two-state Viterbi and a switch cost | 0.478 / 0.469 / 0.475 at best | dropped: clearly worse than the rules |
 
 The diagnosis behind these results: on the clean tracking of game 3, 28% of the reference changes
 of possession are missed and 30% of predicted ones are spurious, mostly around short possessions
 (under 4 s) and contested balls, where the geometric control rule and the event-based reference
 disagree. Neither model fixed that.
+
+The whistle detector and the last-touch rule came from watching the public 5 minutes next to the
+video to understand the definition (allowed by the rules: fouls are dead from the whistle; a block
+that ends out of play belongs to the blocking team). We implemented them as general rules,
+measured them only on the external games, and dropped both. No threshold was chosen on the
+public window.
 
 The SkillCorner check makes the same point from another side: each reference prefers settings
 close to its own conventions (Metrica's events change possession quickly, SkillCorner's phases
@@ -205,8 +217,8 @@ source .venv/bin/activate
 pip install -r solution/requirements.txt
 # put the data bundle in ./data (see DATA.md), at least data/tactical/:
 #   BAR-ATH_tactical_atd.txt, BAR-ATH_tactical_atd.xml, BAR-ATH_tactical_smart_tagging.xml
-python solution/possession.py          # writes evaluation/results/rules_v2.csv
-python evaluation/validate_submission.py evaluation/results/rules_v2.csv
+python solution/possession.py          # writes evaluation/results/rules_v3.csv (submitted)
+python evaluation/validate_submission.py evaluation/results/rules_v3.csv
 python evaluation/run_evaluation.py
 ```
 

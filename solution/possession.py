@@ -73,8 +73,17 @@ MIN_DEAD_S = 2.0             # shorter dead stretches are noise
 MIN_ALIVE_S = 1.0            # alive gaps shorter than this inside a stoppage are noise
 SETPIECE_LOOKBACK_S = 8.0    # how far before a tagged set piece the stoppage may start
 NOBALL_ALONE_S = None        # ball untracked this long = stoppage, whatever the players do
+WHISTLE = False              # v3: collective deceleration = referee's whistle
+WHISTLE_MS = 1.2             # mean player speed (1 s window) under this = everybody stopped
+WHISTLE_MIN_S = 2.0          # ...for at least this long
+WHISTLE_BACK_S = 2.0         # the stoppage starts where the deceleration started (max look-back)
+LAST_TOUCH_OUT = False       # v3: a touch just before a stoppage gives the ball to that team
 
 HOME, AWAY, NONE = 0, 1, -1
+
+# Published match facts (FAQ.md "Which frames are actually graded?"), not ground truth
+SECOND_HALF_GRADED_FROM = 110808
+SECOND_HALF_KICKOFF = 113742
 
 TEAM_TAG = {"barcelona": HOME, "atletic club": AWAY, "athletic club": AWAY}
 
@@ -188,7 +197,7 @@ def ball_speed(bx, by, max_gap=5):
 # ---------------------------------------------------------------------------------------------
 # Dead ball
 # ---------------------------------------------------------------------------------------------
-def dead_mask(bx, by, bspeed, activity, set_pieces, pitch):
+def dead_mask(bx, by, bspeed, activity, set_pieces, pitch, activity_short=None):
     length, width = pitch
     n = len(bx)
     seen = ~np.isnan(bx)
@@ -234,6 +243,20 @@ def dead_mask(bx, by, bspeed, activity, set_pieces, pitch):
         for a, b in runs(~seen):
             if (b - a) >= NOBALL_ALONE_S * FPS:
                 dead[a:b] = True
+
+    # e. the whistle: everybody slows down at once, for a while, ball seen or not
+    if WHISTLE and activity_short is not None:
+        a1 = np.nan_to_num(activity_short, nan=99.0)
+        for a, b in runs(a1 < WHISTLE_MS):
+            if (b - a) < WHISTLE_MIN_S * FPS:
+                continue
+            start = a
+            lo = max(0, a - int(WHISTLE_BACK_S * FPS))
+            while start > lo and a1[start - 1] < WALKING_MS and a1[start - 1] >= a1[start]:
+                start -= 1
+            k = np.where(kicked[b:min(n, b + 3 * FPS)])[0]
+            end = b + k[0] if len(k) else b
+            dead[start:end] = True
 
     # d. tagged set pieces: the stoppage runs up to the moment the ball is struck
     for start, end, _team in set_pieces:
@@ -338,6 +361,9 @@ def possession_in_stretch(ev, a, b, restart_team, carry_team, seen=None, shape=N
                     run_team, run_count = NONE, 0
         out[i] = current if current != NONE else out[i]
 
+    if LAST_TOUCH_OUT and current != NONE and run_team != NONE and run_team != current \
+            and run_start > last_own and (b - 1 - run_last) <= 2 * FPS:
+        out[run_start - a:] = run_team              # their touch sent the ball out of play
     if current == NONE:
         current = carry_team if carry_team != NONE else HOME
         out[:] = current
@@ -386,7 +412,7 @@ def label_match(ev, dead, set_pieces, n, seen=None, shape_p=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default=os.path.join(ROOT, "evaluation", "results",
-                                                      "rules_v2.csv"))
+                                                      "rules_v3.csv"))
     parser.add_argument("--data-dir", default=None)
     args = parser.parse_args()
 
@@ -408,14 +434,19 @@ def main():
         warnings.simplefilter("ignore", RuntimeWarning)
         mean_speed = np.nanmean(ps, axis=1)
     activity = rolling_mean_nan(mean_speed, int(ACTIVITY_WINDOW_S * FPS))
+    activity_short = rolling_mean_nan(mean_speed, FPS)
     bspeed = ball_speed(bx, by)
     q = np.nanpercentile(activity, [10, 25, 50, 75, 90])
     print("  collective speed (m/s) p10/25/50/75/90: " + " ".join("{:.2f}".format(v) for v in q))
     print("  (Metrica Sample Game 3: about 1.0 in stoppages, about 2.0 in play)")
 
-    dead = dead_mask(bx, by, bspeed, activity, set_pieces, pitch)
+    dead = dead_mask(bx, by, bspeed, activity, set_pieces, pitch, activity_short)
     ev = control_evidence(px, py, team_of_slot, bx, by)
     labels = label_match(ev, dead, set_pieces, n, ~np.isnan(bx))
+
+    # The second half is graded from video frame 110,808 but kicks off at 113,742 (FAQ.md,
+    # DATA.md, starter/load_smart_tagging.py): the ball is dead until the kick-off.
+    labels[SECOND_HALF_GRADED_FROM:SECOND_HALF_KICKOFF] = "D"
 
     # only the two halves are graded; X elsewhere
     graded = np.zeros(n, dtype=bool)
