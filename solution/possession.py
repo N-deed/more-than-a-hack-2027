@@ -50,11 +50,12 @@ from games import GAME, GAMES, half_video_blocks, require, source_frames  # noqa
 FPS = 25
 
 # Control
-CONTROL_RADIUS_M = 2.0       # ball within 2 m of a player: he can play it (tracking noise ~1 m)
+CONTROL_RADIUS_M = 1.5       # ball within 1.5 m of a player: he can play it (v2, calibrated on Metrica)
 CONTEST_MARGIN_M = 0.5       # nearest opponent must be at least this much further away
-CONFIRM_FRAMES = 13          # ~0.5 s of cumulative control before a change of possession counts
+CONFIRM_FRAMES = 8           # ~0.3 s of cumulative control before a change counts (v2, calibrated)
 RUN_GAP_FRAMES = 2 * FPS     # evidence more than 2 s apart is not the same attempt at control
 RESTART_CONFIRM_FRAMES = 5   # after a restart the first clear touch is enough (0.2 s)
+GAP_DATING = True            # change inside a tracking gap: date it mid-gap, not at reappearance
 
 # Dead ball
 OUT_MARGIN_M = 0.5           # ball must be clearly over the line, not on it
@@ -62,12 +63,13 @@ OUT_MIN_FRAMES = 3           # ...for a few observations, to ignore single track
 KICK_SPEED_MS = 4.0          # a restart is played when the ball moves faster than this
 STILL_SPEED_MS = 1.0         # ball "not moving"
 STILL_MIN_S = 3.0            # stationary at least this long (keeper holding the ball < 3 s moves)
-WALKING_MS = 1.6             # mean player speed under this = players walking, game stopped
+WALKING_MS = 1.8             # mean player speed under this = game stopped (v2, calibrated)
 NOBALL_MIN_S = 4.0           # no ball AND players walking for this long = stoppage
 ACTIVITY_WINDOW_S = 3.0      # smoothing of the collective speed
 MIN_DEAD_S = 2.0             # shorter dead stretches are noise
 MIN_ALIVE_S = 1.0            # alive gaps shorter than this inside a stoppage are noise
 SETPIECE_LOOKBACK_S = 8.0    # how far before a tagged set piece the stoppage may start
+NOBALL_ALONE_S = None        # ball untracked this long = stoppage, whatever the players do
 
 HOME, AWAY, NONE = 0, 1, -1
 
@@ -224,6 +226,12 @@ def dead_mask(bx, by, bspeed, activity, set_pieces, pitch):
         if (b - a) >= NOBALL_MIN_S * FPS:
             dead[a:b] = True
 
+    # c2. ball untracked for a long time, players moving or not
+    if NOBALL_ALONE_S:
+        for a, b in runs(~seen):
+            if (b - a) >= NOBALL_ALONE_S * FPS:
+                dead[a:b] = True
+
     # d. tagged set pieces: the stoppage runs up to the moment the ball is struck
     for start, end, _team in set_pieces:
         k = np.where(kicked[start:end])[0]
@@ -254,8 +262,9 @@ def control_evidence(px, py, team_of_slot, bx, by):
     dx = px - bx[:, None]
     dy = py - by[:, None]
     dist = np.hypot(dx, dy)                                  # NaN where anything is missing
-    home = np.where(team_of_slot[None, :] == HOME, dist, np.nan)
-    away = np.where(team_of_slot[None, :] == AWAY, dist, np.nan)
+    ts = team_of_slot if team_of_slot.ndim == 2 else team_of_slot[None, :]
+    home = np.where(ts == HOME, dist, np.nan)
+    away = np.where(ts == AWAY, dist, np.nan)
     with np.errstate(all="ignore"):
         dh = np.nanmin(np.where(np.isnan(home), np.inf, home), axis=1)
         da = np.nanmin(np.where(np.isnan(away), np.inf, away), axis=1)
@@ -268,11 +277,12 @@ def control_evidence(px, py, team_of_slot, bx, by):
     return ev
 
 
-def possession_in_stretch(ev, a, b, restart_team, carry_team):
+def possession_in_stretch(ev, a, b, restart_team, carry_team, seen=None):
     """Team in possession for frames a..b-1 of one alive stretch."""
     out = np.full(b - a, NONE, dtype=np.int8)
     current = restart_team
     run_team, run_start, run_count, run_last = NONE, 0, 0, -10 ** 9
+    last_own = -1
 
     for t in range(a, b):
         e = ev[t]
@@ -290,6 +300,7 @@ def possession_in_stretch(ev, a, b, restart_team, carry_team):
                     run_team, run_count = NONE, 0
             elif e == current:
                 run_team, run_count = NONE, 0           # the team in possession touched it again
+                last_own = t
             else:
                 if e != run_team or t - run_last > RUN_GAP_FRAMES:
                     run_team, run_start, run_count = e, t, 0
@@ -297,7 +308,12 @@ def possession_in_stretch(ev, a, b, restart_team, carry_team):
                 run_last = t
                 if run_count >= CONFIRM_FRAMES:
                     current = run_team
-                    out[run_start - a:i + 1] = current  # dated back to their first touch
+                    change = run_start                  # dated back to their first touch
+                    if GAP_DATING and seen is not None and last_own >= a:
+                        between = seen[last_own + 1:run_start]
+                        if len(between) and between.mean() < 0.5:
+                            change = (last_own + 1 + run_start) // 2
+                    out[change - a:i + 1] = current
                     run_team, run_count = NONE, 0
         out[i] = current if current != NONE else out[i]
 
@@ -311,7 +327,7 @@ def possession_in_stretch(ev, a, b, restart_team, carry_team):
     return out
 
 
-def label_match(ev, dead, set_pieces, n):
+def label_match(ev, dead, set_pieces, n, seen=None):
     team = np.full(n, NONE, dtype=np.int8)
     # team named by the set piece that restarts an alive stretch, if any
     restart_of = {}
@@ -327,7 +343,7 @@ def label_match(ev, dead, set_pieces, n):
             if s - 2 * FPS <= a <= e:
                 restart_team = t
                 break
-        seg = possession_in_stretch(ev, a, b, restart_team, carry)
+        seg = possession_in_stretch(ev, a, b, restart_team, carry, seen)
         team[a:b] = seg
         carry = seg[-1]
 
@@ -344,7 +360,7 @@ def label_match(ev, dead, set_pieces, n):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default=os.path.join(ROOT, "evaluation", "results",
-                                                      "rules_v1.csv"))
+                                                      "rules_v2.csv"))
     parser.add_argument("--data-dir", default=None)
     args = parser.parse_args()
 
@@ -361,14 +377,19 @@ def main():
     set_pieces = read_set_pieces(tag_path, n)
     print("  {} set pieces in the Smart Tagging".format(len(set_pieces)))
 
-    with np.errstate(all="ignore"):
+    import warnings
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         mean_speed = np.nanmean(ps, axis=1)
     activity = rolling_mean_nan(mean_speed, int(ACTIVITY_WINDOW_S * FPS))
     bspeed = ball_speed(bx, by)
+    q = np.nanpercentile(activity, [10, 25, 50, 75, 90])
+    print("  collective speed (m/s) p10/25/50/75/90: " + " ".join("{:.2f}".format(v) for v in q))
+    print("  (Metrica Sample Game 3: about 1.0 in stoppages, about 2.0 in play)")
 
     dead = dead_mask(bx, by, bspeed, activity, set_pieces, pitch)
     ev = control_evidence(px, py, team_of_slot, bx, by)
-    labels = label_match(ev, dead, set_pieces, n)
+    labels = label_match(ev, dead, set_pieces, n, ~np.isnan(bx))
 
     # only the two halves are graded; X elsewhere
     graded = np.zeros(n, dtype=bool)
