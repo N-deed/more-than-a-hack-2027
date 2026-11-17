@@ -79,6 +79,7 @@ phases, not possessions, and copying their intervals would import their errors.
 | dataset | source | labels | who labelled it | size |
 |---|---|---|---|---|
 | Sample Games 1, 2, 3 | Metrica Sports open data, github.com/metrica-sports/sample-data | event data (passes, carries, recoveries, set pieces, balls out) | Metrica Sports, published with the data | three full anonymised matches, about 430,000 frames, 10,000+ events |
+| 20 A-League 2024/25 matches | SkillCorner open data, github.com/SkillCorner/opendata (MIT) | phases of play with the team in possession | SkillCorner Game Intelligence, published with the data | 20 full matches of broadcast tracking at 10 fps |
 
 The thresholds were calibrated on Sample Game 3 (the one in EPTS format, like the challenge ATD).
 Games 1 and 2 were kept aside as independent checks, and used to train and test the models we
@@ -165,12 +166,19 @@ third), degraded with the challenge gap model. `solution/experiments.py` reprodu
 |---|---|---|---|
 | v2 (reference) | rules | 0.596 / 0.578 / 0.548 | kept |
 | team-shape model during ball gaps | a logistic model on collective features (block height, forward speed, width, length, last line, home minus away) predicts the team in possession at 77-79% per frame without the ball; used to change possession during long gaps | 0.595 / 0.578 / 0.549 at best | dropped: no gain. Only 15% of the changes of possession fall inside a ball gap, so there was little to win |
+| recalibrating on SkillCorner | a second, independent reference: SkillCorner phases of play (gaps under 3 s between phases keep the previous team, longer gaps are stoppages), 20 broadcast-tracking matches resampled to 25 fps and degraded the same way; grid on 10 matches, check on the other 10 | v2: Metrica 0.574 mean, SkillCorner held-out 0.490. Best SkillCorner setting (0.8 s confirmation, 2 m, 1.4 m/s): SkillCorner 0.528 but Metrica 0.500. Best average over both providers: v2 (0.532) | v2 kept: the two providers disagree on how quickly possession changes hands, and v2 is the best compromise between them |
 | learned emissions + Viterbi | the rules replaced by a per-frame logistic model (ball distances, players near the ball, team shape) decoded with a two-state Viterbi and a switch cost | 0.478 / 0.469 / 0.475 at best | dropped: clearly worse than the rules |
 
 The diagnosis behind these results: on the clean tracking of game 3, 28% of the reference changes
 of possession are missed and 30% of predicted ones are spurious, mostly around short possessions
 (under 4 s) and contested balls, where the geometric control rule and the event-based reference
 disagree. Neither model fixed that.
+
+The SkillCorner check makes the same point from another side: each reference prefers settings
+close to its own conventions (Metrica's events change possession quickly, SkillCorner's phases
+less so). The remaining error is mostly a question of definition, not of tracking quality, and
+the challenge's own definition can only be read from its 5 public minutes, which the rules
+forbid using for tuning.
 
 ## 7. Limitations and what we would do with more time
 
@@ -209,6 +217,7 @@ git clone --depth 1 https://github.com/metrica-sports/sample-data.git ../metrica
 python solution/diagnose_atd.py                  # gap model of the challenge ATD, no labels
 python solution/calibrate_metrica.py --sample ../metrica-sample-data/data/Sample_Game_3
 python solution/experiments.py --sample ../metrica-sample-data/data
+python solution/experiments_skillcorner.py --skillcorner <skillcorner folder> --metrica ../metrica-sample-data/data
 ```
 
 `solution/possession.py` is deterministic: the same data produces the same file, byte for byte.
