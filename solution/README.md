@@ -1,6 +1,6 @@
 # Rule-based ball possession: technical document
 
-More Than A Hack 2027, Phase 1. Team: N-deed.
+More Than A Hack 2027, Phase 1. Team: N_DEED.
 
 ## 1. Approach
 
