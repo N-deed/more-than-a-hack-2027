@@ -55,6 +55,9 @@ CONTEST_MARGIN_M = 0.5       # nearest opponent must be at least this much furth
 CONFIRM_FRAMES = 8           # ~0.3 s of cumulative control before a change counts (v2, calibrated)
 RUN_GAP_FRAMES = 2 * FPS     # evidence more than 2 s apart is not the same attempt at control
 RESTART_CONFIRM_FRAMES = 5   # after a restart the first clear touch is enough (0.2 s)
+USE_SHAPE = False            # use the team-shape model while the ball is not tracked (v3)
+SHAPE_P = 0.8                # shape evidence only when P(team in possession) is at least this
+SHAPE_CONFIRM_S = 2.0        # ...for this long without the ball, to change possession
 GAP_DATING = True            # change inside a tracking gap: date it mid-gap, not at reappearance
 
 # Dead ball
@@ -277,16 +280,34 @@ def control_evidence(px, py, team_of_slot, bx, by):
     return ev
 
 
-def possession_in_stretch(ev, a, b, restart_team, carry_team, seen=None):
+def possession_in_stretch(ev, a, b, restart_team, carry_team, seen=None, shape=None):
     """Team in possession for frames a..b-1 of one alive stretch."""
     out = np.full(b - a, NONE, dtype=np.int8)
     current = restart_team
     run_team, run_start, run_count, run_last = NONE, 0, 0, -10 ** 9
     last_own = -1
+    shape_team, shape_start = NONE, 0
+    shape_need = int(SHAPE_CONFIRM_S * FPS)
 
     for t in range(a, b):
         e = ev[t]
         i = t - a
+        # team shape, only while the ball is not tracked
+        if USE_SHAPE and shape is not None and seen is not None and not seen[t] \
+                and current != NONE:
+            s_t = shape[t]
+            if s_t != NONE and s_t != current:
+                if s_t != shape_team:
+                    shape_team, shape_start = s_t, t
+                elif t - shape_start + 1 >= shape_need:
+                    current = shape_team
+                    out[shape_start - a:i + 1] = current
+                    shape_team = NONE
+                    run_team, run_count = NONE, 0
+            else:
+                shape_team = NONE
+        elif seen is not None and seen[t]:
+            shape_team = NONE
         if e != NONE:
             if current == NONE:
                 # restart without a tagged team: first team with a few frames of control
@@ -327,7 +348,7 @@ def possession_in_stretch(ev, a, b, restart_team, carry_team, seen=None):
     return out
 
 
-def label_match(ev, dead, set_pieces, n, seen=None):
+def label_match(ev, dead, set_pieces, n, seen=None, shape_p=None):
     team = np.full(n, NONE, dtype=np.int8)
     # team named by the set piece that restarts an alive stretch, if any
     restart_of = {}
@@ -335,6 +356,11 @@ def label_match(ev, dead, set_pieces, n, seen=None):
         if t != NONE:
             restart_of[(start, end)] = t
 
+    shape = None
+    if shape_p is not None:
+        shape = np.full(n, NONE, dtype=np.int8)
+        shape[shape_p >= SHAPE_P] = HOME
+        shape[shape_p <= 1.0 - SHAPE_P] = AWAY
     alive_runs = runs(~dead)
     carry = NONE
     for a, b in alive_runs:
@@ -343,7 +369,7 @@ def label_match(ev, dead, set_pieces, n, seen=None):
             if s - 2 * FPS <= a <= e:
                 restart_team = t
                 break
-        seg = possession_in_stretch(ev, a, b, restart_team, carry, seen)
+        seg = possession_in_stretch(ev, a, b, restart_team, carry, seen, shape)
         team[a:b] = seg
         carry = seg[-1]
 

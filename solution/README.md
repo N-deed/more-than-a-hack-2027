@@ -78,7 +78,11 @@ phases, not possessions, and copying their intervals would import their errors.
 
 | dataset | source | labels | who labelled it | size |
 |---|---|---|---|---|
-| Sample Game 3 | Metrica Sports open data, github.com/metrica-sports/sample-data | event data (passes, carries, recoveries, set pieces, balls out) | Metrica Sports, published with the data | one full anonymised match, 143,761 frames, 3,620 events |
+| Sample Games 1, 2, 3 | Metrica Sports open data, github.com/metrica-sports/sample-data | event data (passes, carries, recoveries, set pieces, balls out) | Metrica Sports, published with the data | three full anonymised matches, about 430,000 frames, 10,000+ events |
+
+The thresholds were calibrated on Sample Game 3 (the one in EPTS format, like the challenge ATD).
+Games 1 and 2 were kept aside as independent checks, and used to train and test the models we
+tried and dropped (section 6).
 
 No data from the challenge match was used to set any parameter.
 
@@ -87,9 +91,14 @@ each set piece until the set piece; otherwise the team of the most recent on-bal
 carry, recovery, set piece, shot, ball lost; challenges ignored). This gives 404 possessions.
 
 **Degradation.** Sample Game 3 tracking is cleaner than the challenge ATD, so before running our
-rules we remove the ball until 41% of frames have none (gaps of random length, mean 2 s), drop 5%
-of player observations and add 0.3 m of position noise. Player speeds are computed from positions
-over 5 frames. Two random seeds, fixed.
+rules we degrade it to look like the challenge tracking. The gap model comes from
+`solution/diagnose_atd.py`, which describes the challenge ATD without using any label: the ball
+is missing on 40.7% of graded frames, in only 150 gaps; no gap under 4 s holds any missing
+frames; gaps of 4-15 s hold 25% of them and longer gaps (players walking, mostly stoppages) the
+rest. Sample Game 3 already loses the ball during its stoppages (31.7% of frames), so we add
+in-play gaps of 4-15 s until 41% of frames have no ball. We also drop 5% of player observations
+and add 0.3 m of position noise. Player speeds are computed from positions over 5 frames. Two
+random seeds, fixed.
 
 **Search.** A coarse grid over the walking threshold, stoppage durations, control radius, contest
 margin and confirmation time, scored with the official `possession_metrics.py`. We picked a
@@ -97,10 +106,21 @@ setting in a flat region of the grid rather than the single best point, and chos
 than 2.0 m/s for the walking threshold to stay conservative where the real tracking loses the
 ball more often than our simulation.
 
-| version | spellF1 on Sample Game 3 (degraded) | macroF1 |
-|---|---|---|
-| v1, a priori thresholds | 0.528 | 0.820 |
-| v2, calibrated | 0.565 | 0.833 |
+spellF1 on the degraded games (mean of two seeds):
+
+| version | game 1 (not used to calibrate) | game 2 (not used to calibrate) | game 3 (calibration) |
+|---|---|---|---|
+| v1, a priori thresholds | 0.562 | 0.558 | 0.506 |
+| **v2, calibrated (submitted)** | **0.596** | **0.578** | **0.548** |
+
+v2 also improves on the two games it was not calibrated on, so the gain is not an artefact of
+fitting game 3. On the clean, undegraded tracking of game 3, v2 reaches 0.575.
+
+The degraded score sits close to the clean one, so on this reference the tracking gaps are not
+the main source of error. What remains is the gap between geometric control and the
+event-derived reference: 72% of its changes of possession are found within 2 s even on clean
+tracking. Tuning further against this reference would fit its own conventions rather than the
+challenge's, so we stopped here.
 
 The public 5-minute ground truth was used only to check the pipeline end to end (frame
 alignment, file format). It was not used to choose or change any threshold.
@@ -136,7 +156,23 @@ between v1 and v2 here is one possession matched at IoU 0.5 (9 against 8), well 
 We submit v2 because its thresholds are the only ones backed by a measurement (section 3), and
 we did not change anything after seeing this score.
 
-## 6. Limitations and what we would do with more time
+## 6. What we tried and dropped
+
+Both were tested leave-one-game-out on the three Metrica games (train on two, test on the
+third), degraded with the challenge gap model. `solution/experiments.py` reproduces every number.
+
+| attempt | idea | result (spellF1, games 1 / 2 / 3) | decision |
+|---|---|---|---|
+| v2 (reference) | rules | 0.596 / 0.578 / 0.548 | kept |
+| team-shape model during ball gaps | a logistic model on collective features (block height, forward speed, width, length, last line, home minus away) predicts the team in possession at 77-79% per frame without the ball; used to change possession during long gaps | 0.595 / 0.578 / 0.549 at best | dropped: no gain. Only 15% of the changes of possession fall inside a ball gap, so there was little to win |
+| learned emissions + Viterbi | the rules replaced by a per-frame logistic model (ball distances, players near the ball, team shape) decoded with a two-state Viterbi and a switch cost | 0.478 / 0.469 / 0.475 at best | dropped: clearly worse than the rules |
+
+The diagnosis behind these results: on the clean tracking of game 3, 28% of the reference changes
+of possession are missed and 30% of predicted ones are spurious, mostly around short possessions
+(under 4 s) and contested balls, where the geometric control rule and the event-based reference
+disagree. Neither model fixed that.
+
+## 7. Limitations and what we would do with more time
 
 - **Changes of possession during a tracking gap** are detected late, when the ball reappears.
   Interpolating the ball through short gaps, or inferring the possessor from the collective shape
@@ -151,7 +187,7 @@ we did not change anything after seeing this score.
 - **Tracking noise**: identity switches do not matter here because only the team is used, but
   duplicated or missing players can bias the nearest-player test near the ball.
 
-## 7. Reproduction
+## 8. Reproduction
 
 Python 3.9 or later.
 
@@ -164,6 +200,15 @@ pip install -r solution/requirements.txt
 python solution/possession.py          # writes evaluation/results/rules_v2.csv
 python evaluation/validate_submission.py evaluation/results/rules_v2.csv
 python evaluation/run_evaluation.py
+```
+
+To reproduce the calibration and the experiments (external data only):
+
+```bash
+git clone --depth 1 https://github.com/metrica-sports/sample-data.git ../metrica-sample-data
+python solution/diagnose_atd.py                  # gap model of the challenge ATD, no labels
+python solution/calibrate_metrica.py --sample ../metrica-sample-data/data/Sample_Game_3
+python solution/experiments.py --sample ../metrica-sample-data/data
 ```
 
 `solution/possession.py` is deterministic: the same data produces the same file, byte for byte.
