@@ -163,8 +163,10 @@ before the second-half kick-off, outside the public window.
 
 ## 6. What we tried and dropped
 
-Both were tested leave-one-game-out on the three Metrica games (train on two, test on the
-third), degraded with the challenge gap model. `solution/experiments.py` reproduces every number.
+Every attempt was measured on external data only, degraded with the challenge gap model: the
+models leave-one-game-out on the three Metrica games (train on two, test on the third), the rules
+on the three Metrica games plus 10 held-out SkillCorner matches. `solution/experiments.py` and
+`solution/experiments_skillcorner.py` reproduce the numbers.
 
 | attempt | idea | result (spellF1, games 1 / 2 / 3) | decision |
 |---|---|---|---|
